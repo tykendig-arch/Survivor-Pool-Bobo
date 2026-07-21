@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLB Runs Survivor Pool</title>
+<style>
+  :root { --green:#1a7f37; --gold:#b8860b; }
+  body { font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:16px; background:#f6f7f9; color:#1c1c1e; }
+  h1 { font-size:1.3rem; margin:0 0 4px; }
+  .sub { color:#666; font-size:.85rem; margin-bottom:12px; }
+  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  button { padding:8px 14px; border:0; border-radius:8px; background:#0a5cd6; color:#fff; font-size:.9rem; cursor:pointer; }
+  button:disabled { opacity:.5; }
+  select { padding:6px; border-radius:8px; }
+  .wrap { overflow-x:auto; background:#fff; border-radius:12px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  table { border-collapse:collapse; width:100%; font-size:.82rem; min-width:900px; }
+  th, td { padding:6px 8px; text-align:center; border-bottom:1px solid #eee; white-space:nowrap; }
+  th { background:#fafafa; position:sticky; top:0; }
+  td.team { text-align:left; font-weight:600; }
+  td.name input { border:1px solid #ddd; border-radius:6px; padding:4px 6px; width:110px; font-size:.82rem; }
+  .num { display:inline-block; width:24px; height:24px; line-height:24px; border-radius:6px; background:#eceff1; color:#9aa0a6; margin:1px; font-size:.75rem; }
+  .num.hit { background:var(--green); color:#fff; font-weight:700; }
+  tr.winner td { background:#fff8e1; }
+  .medal { font-size:1rem; }
+  .remain { font-weight:700; }
+  .done { color:var(--green); font-weight:700; }
+  .updated { font-size:.75rem; color:#888; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>⚾ MLB Runs Survivor Pool</h1>
+<div class="sub">First team to score every run total 0–13 wins. Payouts to the first three finishers.</div>
+
+<div class="controls">
+  <label>Season:
+    <select id="season">
+      <option>2026</option><option>2025</option>
+    </select>
+  </label>
+  <button id="refresh">Refresh Scores</button>
+  <span id="status"></span>
+</div>
+
+<div class="wrap">
+<table id="board">
+  <thead>
+    <tr>
+      <th>#</th><th>Participant</th><th>Team</th>
+      <th colspan="14">Runs Checked Off (0–13)</th>
+      <th>Left</th><th>Needs</th><th>Finished</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+</div>
+<div class="updated" id="updated"></div>
+
+<script>
+const NAMES_KEY = 'survivorPoolNames';
+const names = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}');
+
+function saveName(teamId, val){
+  names[teamId] = val;
+  localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+}
+
+async function loadSeason(){
+  const season = document.getElementById('season').value;
+  const status = document.getElementById('status');
+  const btn = document.getElementById('refresh');
+  btn.disabled = true;
+  status.textContent = 'Loading…';
+  try {
+    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=${season}&gameType=R&startDate=${season}-02-01&endDate=${season}-11-30`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    // Collect every final game result per team, in chronological order
+    const teamGames = {}; // teamId -> [{runs, ts, dateStr}]
+    for (const day of (data.dates || [])) {
+      for (const g of day.games) {
+        const st = g.status && g.status.abstractGameState;
+        if (st !== 'Final') continue;
+        if (g.status.codedGameState === 'C' || g.status.codedGameState === 'D') continue; // cancelled/postponed
+        const ts = new Date(g.gameDate).getTime();
+        for (const side of ['away','home']) {
+          const t = g.teams[side];
+          if (t.score === undefined || t.score === null) continue;
+          const id = t.team.id;
+          (teamGames[id] = teamGames[id] || { name: t.team.name, games: [] })
+            .games.push({ runs: t.score, ts, dateStr: day.date });
+        }
+      }
+    }
+
+    // Build each team's 0–13 card
+    const rows = [];
+    for (const [id, info] of Object.entries(teamGames)) {
+      info.games.sort((a,b) => a.ts - b.ts);
+      const hit = {};           // run total -> dateStr first achieved
+      let completed = null;     // ts when 14th number checked
+      let completedDate = null;
+      for (const gm of info.games) {
+        if (gm.runs <= 13 && !(gm.runs in hit)) {
+          hit[gm.runs] = gm.dateStr;
+          if (Object.keys(hit).length === 14) { completed = gm.ts; completedDate = gm.dateStr; break; }
+        }
+      }
+      const missing = [];
+      for (let n = 0; n <= 13; n++) if (!(n in hit)) missing.push(n);
+      rows.push({ id, team: info.name, hit, missing, completed, completedDate });
+    }
+
+    // Rank: finishers by completion time, then everyone else by fewest remaining
+    rows.sort((a,b) => {
+      if (a.completed && b.completed) return a.completed - b.completed;
+      if (a.completed) return -1;
+      if (b.completed) return 1;
+      if (a.missing.length !== b.missing.length) return a.missing.length - b.missing.length;
+      return a.team.localeCompare(b.team);
+    });
+
+    render(rows);
+    document.getElementById('updated').textContent =
+      'Last updated: ' + new Date().toLocaleString();
+    status.textContent = '';
+  } catch (e) {
+    status.textContent = 'Error loading scores — try again.';
+    console.error(e);
+  }
+  btn.disabled = false;
+}
+
+function render(rows){
+  const tbody = document.querySelector('#board tbody');
+  tbody.innerHTML = '';
+  const medals = ['🥇','🥈','🥉'];
+  let finishCount = 0;
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    let medal = '';
+    if (r.completed) {
+      if (finishCount < 3) { medal = medals[finishCount]; tr.classList.add('winner'); }
+      finishCount++;
+    }
+    const cells = [];
+    cells.push(`<td>${i+1} <span class="medal">${medal}</span></td>`);
+    cells.push(`<td class="name"><input placeholder="Add name…" value="${(names[r.id]||'').replace(/"/g,'&quot;')}" onchange="saveName('${r.id}', this.value)"></td>`);
+    cells.push(`<td class="team">${r.team}</td>`);
+    for (let n = 0; n <= 13; n++) {
+      const done = n in r.hit;
+      cells.push(`<td><span class="num ${done?'hit':''}" title="${done ? 'First hit: ' + r.hit[n] : 'Not yet'}">${n}</span></td>`);
+    }
+    cells.push(`<td class="remain ${r.missing.length===0?'done':''}">${r.missing.length===0 ? '✓' : r.missing.length}</td>`);
+    cells.push(`<td>${r.missing.join(', ') || '—'}</td>`);
+    cells.push(`<td>${r.completedDate || ''}</td>`);
+    tr.innerHTML = cells.join('');
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById('refresh').addEventListener('click', loadSeason);
+document.getElementById('season').addEventListener('change', loadSeason);
+loadSeason();
+</script>
+</body>
+</html>
