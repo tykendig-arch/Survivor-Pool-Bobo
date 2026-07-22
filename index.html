@@ -29,13 +29,20 @@
   /* Admin panel */
   #admin { background:#fff; border:2px dashed #0a5cd6; border-radius:12px; padding:14px; margin-bottom:16px; }
   #admin h2 { font-size:1rem; margin:0 0 10px; }
+  #admin h3 { font-size:.9rem; margin:16px 0 6px; }
   #admin label { display:block; font-size:.8rem; margin:8px 0 2px; color:#444; }
   #admin input[type=text], #admin input[type=date] { padding:6px 8px; border:1px solid #ccc; border-radius:6px; width:min(320px, 90%); font-size:.85rem; }
+  #admin textarea { width:100%; font-size:.8rem; border:1px solid #ccc; border-radius:6px; padding:6px; }
+  #ownerList { height:140px; }
   .nameGrid { display:grid; grid-template-columns:auto 1fr; gap:4px 8px; align-items:center; margin-top:8px; }
   .nameGrid span { font-size:.78rem; text-align:right; }
   .nameGrid input { padding:4px 6px; border:1px solid #ccc; border-radius:6px; font-size:.8rem; }
-  #jsonOut { width:100%; height:160px; font-family:monospace; font-size:.72rem; margin-top:10px; }
+  #jsonOut { height:160px; font-family:monospace; font-size:.72rem; margin-top:10px; }
   .hint { font-size:.75rem; color:#666; margin-top:6px; line-height:1.4; }
+  #drawResults { background:#f0f7ff; border-radius:8px; padding:10px; margin-top:10px; font-size:.8rem; display:none; }
+  #drawResults div { padding:2px 0; }
+  .drawBtns { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .warn { color:#b00020; font-size:.78rem; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -44,14 +51,28 @@
 
 <div id="admin" style="display:none">
   <h2>🛠 Commissioner Setup — New Round</h2>
+
   <label>Round start date</label>
   <input type="date" id="admStart">
   <label>Round label</label>
   <input type="text" id="admRound" placeholder="Round 3">
   <label>Payouts line</label>
   <input type="text" id="admPayouts" placeholder="1st: $600 · 2nd: $300 · 3rd: $150">
-  <label>Participants (edit any that changed)</label>
+
+  <h3>🎲 Random Team Draw</h3>
+  <label>Owners — one per line (up to 30)</label>
+  <textarea id="ownerList" placeholder="Greg A - CA&#10;Corie D - TN&#10;Debbie C - Honeywell&#10;…"></textarea>
+  <div class="drawBtns">
+    <button id="loadPrevOwners" type="button">Load current owners</button>
+    <button id="drawBtn" type="button">🎲 Run the Draw</button>
+  </div>
+  <div class="warn" id="drawWarn"></div>
+  <div id="drawResults"></div>
+
+  <h3>Assignments</h3>
+  <div class="hint">Filled automatically by the draw, or edit by hand. This is what goes into the config.</div>
   <div class="nameGrid" id="admNames"></div>
+
   <button id="genBtn" style="margin-top:12px">Generate config.json</button>
   <textarea id="jsonOut" readonly placeholder="Generated config will appear here…"></textarea>
   <div class="hint">
@@ -95,7 +116,6 @@ const TEAM_NAMES = {
 };
 
 async function loadConfig(){
-  // cache-bust so a fresh commit shows up right away
   const res = await fetch('config.json?t=' + Date.now());
   CONFIG = await res.json();
   document.getElementById('roundLabel').textContent = CONFIG.roundLabel || '';
@@ -200,11 +220,12 @@ function render(rows){
 async function initAdmin(){
   if (!new URLSearchParams(location.search).has('admin')) return;
   if (!CONFIG) await loadConfig();
-  const panel = document.getElementById('admin');
-  panel.style.display = 'block';
+  document.getElementById('admin').style.display = 'block';
   document.getElementById('admStart').value = CONFIG.startDate || '';
   document.getElementById('admRound').value = CONFIG.roundLabel || '';
   document.getElementById('admPayouts').value = CONFIG.payouts || '';
+
+  // Build the assignment grid, alphabetical by team
   const grid = document.getElementById('admNames');
   const ids = Object.keys(TEAM_NAMES).map(Number).sort((a,b)=>TEAM_NAMES[a].localeCompare(TEAM_NAMES[b]));
   for (const id of ids) {
@@ -216,9 +237,53 @@ async function initAdmin(){
     grid.appendChild(span);
     grid.appendChild(inp);
   }
+
+  // Load current owners into the draw box
+  document.getElementById('loadPrevOwners').addEventListener('click', () => {
+    const owners = Object.values(CONFIG.participants || {});
+    document.getElementById('ownerList').value = owners.join('\n');
+  });
+
+  // The draw
+  document.getElementById('drawBtn').addEventListener('click', () => {
+    const warn = document.getElementById('drawWarn');
+    warn.textContent = '';
+    const owners = document.getElementById('ownerList').value
+      .split('\n').map(s => s.trim()).filter(Boolean);
+    if (owners.length === 0) { warn.textContent = 'Add at least one owner first.'; return; }
+    if (owners.length > 30) { warn.textContent = `You have ${owners.length} owners — max is 30.`; return; }
+    if (owners.length < 30) {
+      warn.textContent = `Heads up: ${owners.length} owners for 30 teams — ${30 - owners.length} team(s) will be left unassigned.`;
+    }
+
+    // Fisher-Yates shuffle of the team IDs, then deal to owners in order
+    const teamIds = Object.keys(TEAM_NAMES).map(Number);
+    for (let i = teamIds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [teamIds[i], teamIds[j]] = [teamIds[j], teamIds[i]];
+    }
+
+    const assignment = {};
+    owners.forEach((owner, idx) => { assignment[teamIds[idx]] = owner; });
+
+    // Fill the grid
+    document.querySelectorAll('#admNames input').forEach(inp => {
+      inp.value = assignment[inp.dataset.teamId] || '';
+    });
+
+    // Show results, sorted by team name for readability
+    const resDiv = document.getElementById('drawResults');
+    resDiv.style.display = 'block';
+    const sorted = Object.entries(assignment)
+      .sort((a,b) => TEAM_NAMES[a[0]].localeCompare(TEAM_NAMES[b[0]]));
+    resDiv.innerHTML = '<b>🎲 Draw Results</b>' +
+      sorted.map(([id, owner]) => `<div><b>${TEAM_NAMES[id]}</b> → ${owner}</div>`).join('');
+  });
+
+  // Generate config
   document.getElementById('genBtn').addEventListener('click', () => {
     const participants = {};
-    grid.querySelectorAll('input').forEach(inp => {
+    document.querySelectorAll('#admNames input').forEach(inp => {
       if (inp.value.trim()) participants[inp.dataset.teamId] = inp.value.trim();
     });
     const out = {
