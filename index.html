@@ -5,20 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MLB Runs Survivor Pool</title>
 <style>
-  :root { --green:#1a7f37; --gold:#b8860b; }
+  :root { --green:#1a7f37; }
   body { font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:16px; background:#f6f7f9; color:#1c1c1e; }
   h1 { font-size:1.3rem; margin:0 0 4px; }
   .sub { color:#666; font-size:.85rem; margin-bottom:12px; }
   .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
   button { padding:8px 14px; border:0; border-radius:8px; background:#0a5cd6; color:#fff; font-size:.9rem; cursor:pointer; }
   button:disabled { opacity:.5; }
-  select { padding:6px; border-radius:8px; }
   .wrap { overflow-x:auto; background:#fff; border-radius:12px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
   table { border-collapse:collapse; width:100%; font-size:.82rem; min-width:900px; }
   th, td { padding:6px 8px; text-align:center; border-bottom:1px solid #eee; white-space:nowrap; }
   th { background:#fafafa; position:sticky; top:0; }
   td.team { text-align:left; font-weight:600; }
-  td.name input { border:1px solid #ddd; border-radius:6px; padding:4px 6px; width:110px; font-size:.82rem; }
+  td.name { text-align:left; }
   .num { display:inline-block; width:24px; height:24px; line-height:24px; border-radius:6px; background:#eceff1; color:#9aa0a6; margin:1px; font-size:.75rem; }
   .num.hit { background:var(--green); color:#fff; font-weight:700; }
   tr.winner td { background:#fff8e1; }
@@ -26,18 +25,43 @@
   .remain { font-weight:700; }
   .done { color:var(--green); font-weight:700; }
   .updated { font-size:.75rem; color:#888; margin-top:8px; }
+  .round { display:inline-block; background:#0a5cd6; color:#fff; border-radius:6px; padding:2px 8px; font-size:.75rem; margin-left:6px; }
+  /* Admin panel */
+  #admin { background:#fff; border:2px dashed #0a5cd6; border-radius:12px; padding:14px; margin-bottom:16px; }
+  #admin h2 { font-size:1rem; margin:0 0 10px; }
+  #admin label { display:block; font-size:.8rem; margin:8px 0 2px; color:#444; }
+  #admin input[type=text], #admin input[type=date] { padding:6px 8px; border:1px solid #ccc; border-radius:6px; width:min(320px, 90%); font-size:.85rem; }
+  .nameGrid { display:grid; grid-template-columns:auto 1fr; gap:4px 8px; align-items:center; margin-top:8px; }
+  .nameGrid span { font-size:.78rem; text-align:right; }
+  .nameGrid input { padding:4px 6px; border:1px solid #ccc; border-radius:6px; font-size:.8rem; }
+  #jsonOut { width:100%; height:160px; font-family:monospace; font-size:.72rem; margin-top:10px; }
+  .hint { font-size:.75rem; color:#666; margin-top:6px; line-height:1.4; }
 </style>
 </head>
 <body>
-<h1>⚾ MLB Runs Survivor Pool</h1>
-<div class="sub">First team to score every run total 0–13 wins. Payouts to the first three finishers.</div>
+<h1>⚾ MLB Runs Survivor Pool <span class="round" id="roundLabel"></span></h1>
+<div class="sub" id="subtitle"></div>
+
+<div id="admin" style="display:none">
+  <h2>🛠 Commissioner Setup — New Round</h2>
+  <label>Round start date</label>
+  <input type="date" id="admStart">
+  <label>Round label</label>
+  <input type="text" id="admRound" placeholder="Round 3">
+  <label>Payouts line</label>
+  <input type="text" id="admPayouts" placeholder="1st: $600 · 2nd: $300 · 3rd: $150">
+  <label>Participants (edit any that changed)</label>
+  <div class="nameGrid" id="admNames"></div>
+  <button id="genBtn" style="margin-top:12px">Generate config.json</button>
+  <textarea id="jsonOut" readonly placeholder="Generated config will appear here…"></textarea>
+  <div class="hint">
+    Copy everything above, then in GitHub open <b>config.json</b> → pencil icon → Select All →
+    paste → Commit changes. The site updates for everyone in about a minute.
+    To open this panel again later, add <b>?admin=1</b> to the site URL.
+  </div>
+</div>
 
 <div class="controls">
-  <label>Season:
-    <select id="season">
-      <option>2026</option><option>2025</option>
-    </select>
-  </label>
   <button id="refresh">Refresh Scores</button>
   <span id="status"></span>
 </div>
@@ -57,32 +81,47 @@
 <div class="updated" id="updated"></div>
 
 <script>
-const NAMES_KEY = 'survivorPoolNames';
-const names = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}');
+let CONFIG = null;
+const TEAM_NAMES = {
+  108:'Los Angeles Angels',109:'Arizona Diamondbacks',110:'Baltimore Orioles',
+  111:'Boston Red Sox',112:'Chicago Cubs',113:'Cincinnati Reds',114:'Cleveland Guardians',
+  115:'Colorado Rockies',116:'Detroit Tigers',117:'Houston Astros',118:'Kansas City Royals',
+  119:'Los Angeles Dodgers',120:'Washington Nationals',121:'New York Mets',
+  133:'Athletics',134:'Pittsburgh Pirates',135:'San Diego Padres',136:'Seattle Mariners',
+  137:'San Francisco Giants',138:'St. Louis Cardinals',139:'Tampa Bay Rays',
+  140:'Texas Rangers',141:'Toronto Blue Jays',142:'Minnesota Twins',143:'Philadelphia Phillies',
+  144:'Atlanta Braves',145:'Chicago White Sox',146:'Miami Marlins',147:'New York Yankees',
+  158:'Milwaukee Brewers'
+};
 
-function saveName(teamId, val){
-  names[teamId] = val;
-  localStorage.setItem(NAMES_KEY, JSON.stringify(names));
+async function loadConfig(){
+  // cache-bust so a fresh commit shows up right away
+  const res = await fetch('config.json?t=' + Date.now());
+  CONFIG = await res.json();
+  document.getElementById('roundLabel').textContent = CONFIG.roundLabel || '';
+  document.getElementById('subtitle').textContent =
+    `First team to score every run total 0–13 wins. Counting games from ${CONFIG.startDate} onward. ${CONFIG.payouts || ''}`;
 }
 
 async function loadSeason(){
-  const season = document.getElementById('season').value;
   const status = document.getElementById('status');
   const btn = document.getElementById('refresh');
   btn.disabled = true;
   status.textContent = 'Loading…';
   try {
-    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=${season}&gameType=R&startDate=${season}-02-01&endDate=${season}-11-30`;
+    if (!CONFIG) await loadConfig();
+    const startDate = CONFIG.startDate;
+    const season = startDate.slice(0,4);
+    const url = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&season=${season}&gameType=R&startDate=${startDate}&endDate=${season}-11-30`;
     const res = await fetch(url);
     const data = await res.json();
 
-    // Collect every final game result per team, in chronological order
-    const teamGames = {}; // teamId -> [{runs, ts, dateStr}]
+    const teamGames = {};
     for (const day of (data.dates || [])) {
+      if (day.date < startDate) continue;
       for (const g of day.games) {
-        const st = g.status && g.status.abstractGameState;
-        if (st !== 'Final') continue;
-        if (g.status.codedGameState === 'C' || g.status.codedGameState === 'D') continue; // cancelled/postponed
+        if (!g.status || g.status.abstractGameState !== 'Final') continue;
+        if (g.status.codedGameState === 'C' || g.status.codedGameState === 'D') continue;
         const ts = new Date(g.gameDate).getTime();
         for (const side of ['away','home']) {
           const t = g.teams[side];
@@ -94,13 +133,11 @@ async function loadSeason(){
       }
     }
 
-    // Build each team's 0–13 card
     const rows = [];
     for (const [id, info] of Object.entries(teamGames)) {
       info.games.sort((a,b) => a.ts - b.ts);
-      const hit = {};           // run total -> dateStr first achieved
-      let completed = null;     // ts when 14th number checked
-      let completedDate = null;
+      const hit = {};
+      let completed = null, completedDate = null;
       for (const gm of info.games) {
         if (gm.runs <= 13 && !(gm.runs in hit)) {
           hit[gm.runs] = gm.dateStr;
@@ -109,10 +146,9 @@ async function loadSeason(){
       }
       const missing = [];
       for (let n = 0; n <= 13; n++) if (!(n in hit)) missing.push(n);
-      rows.push({ id, team: info.name, hit, missing, completed, completedDate });
+      rows.push({ id: Number(id), team: info.name, hit, missing, completed, completedDate });
     }
 
-    // Rank: finishers by completion time, then everyone else by fewest remaining
     rows.sort((a,b) => {
       if (a.completed && b.completed) return a.completed - b.completed;
       if (a.completed) return -1;
@@ -122,11 +158,10 @@ async function loadSeason(){
     });
 
     render(rows);
-    document.getElementById('updated').textContent =
-      'Last updated: ' + new Date().toLocaleString();
+    document.getElementById('updated').textContent = 'Last updated: ' + new Date().toLocaleString();
     status.textContent = '';
   } catch (e) {
-    status.textContent = 'Error loading scores — try again.';
+    status.textContent = 'Error loading — try again.';
     console.error(e);
   }
   btn.disabled = false;
@@ -137,6 +172,7 @@ function render(rows){
   tbody.innerHTML = '';
   const medals = ['🥇','🥈','🥉'];
   let finishCount = 0;
+  const parts = (CONFIG && CONFIG.participants) || {};
   rows.forEach((r, i) => {
     const tr = document.createElement('tr');
     let medal = '';
@@ -146,7 +182,7 @@ function render(rows){
     }
     const cells = [];
     cells.push(`<td>${i+1} <span class="medal">${medal}</span></td>`);
-    cells.push(`<td class="name"><input placeholder="Add name…" value="${(names[r.id]||'').replace(/"/g,'&quot;')}" onchange="saveName('${r.id}', this.value)"></td>`);
+    cells.push(`<td class="name">${parts[r.id] || ''}</td>`);
     cells.push(`<td class="team">${r.team}</td>`);
     for (let n = 0; n <= 13; n++) {
       const done = n in r.hit;
@@ -160,9 +196,45 @@ function render(rows){
   });
 }
 
+/* ---------- Commissioner admin panel (?admin=1) ---------- */
+async function initAdmin(){
+  if (!new URLSearchParams(location.search).has('admin')) return;
+  if (!CONFIG) await loadConfig();
+  const panel = document.getElementById('admin');
+  panel.style.display = 'block';
+  document.getElementById('admStart').value = CONFIG.startDate || '';
+  document.getElementById('admRound').value = CONFIG.roundLabel || '';
+  document.getElementById('admPayouts').value = CONFIG.payouts || '';
+  const grid = document.getElementById('admNames');
+  const ids = Object.keys(TEAM_NAMES).map(Number).sort((a,b)=>TEAM_NAMES[a].localeCompare(TEAM_NAMES[b]));
+  for (const id of ids) {
+    const span = document.createElement('span');
+    span.textContent = TEAM_NAMES[id];
+    const inp = document.createElement('input');
+    inp.value = (CONFIG.participants && CONFIG.participants[id]) || '';
+    inp.dataset.teamId = id;
+    grid.appendChild(span);
+    grid.appendChild(inp);
+  }
+  document.getElementById('genBtn').addEventListener('click', () => {
+    const participants = {};
+    grid.querySelectorAll('input').forEach(inp => {
+      if (inp.value.trim()) participants[inp.dataset.teamId] = inp.value.trim();
+    });
+    const out = {
+      startDate: document.getElementById('admStart').value,
+      roundLabel: document.getElementById('admRound').value,
+      payouts: document.getElementById('admPayouts').value,
+      participants
+    };
+    const ta = document.getElementById('jsonOut');
+    ta.value = JSON.stringify(out, null, 2);
+    ta.focus(); ta.select();
+  });
+}
+
 document.getElementById('refresh').addEventListener('click', loadSeason);
-document.getElementById('season').addEventListener('change', loadSeason);
-loadSeason();
+(async () => { await loadConfig(); await Promise.all([loadSeason(), initAdmin()]); })();
 </script>
 </body>
 </html>
